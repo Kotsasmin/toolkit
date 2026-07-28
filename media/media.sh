@@ -47,6 +47,7 @@ echo "Select download type:"
 echo "1) Audio (MP3, Max Quality, Metadata)"
 echo "2) Video (Max Quality, Metadata)"
 echo "3) Video for Discord (<10MB, No Metadata)"
+echo "4) Video (FHD 1080p max, H.264/MP4 Compatible, No Recoding)"
 read -r choice
 
 echo "Enter YouTube URL:"
@@ -117,6 +118,19 @@ case $choice in
         fi
 
         echo "Done! Saved to $output_file"
+        ;;
+    4)
+        echo "Downloading Video (FHD 1080p max, H.264/MP4 Compatible)..."
+        # Select closest resolution up to 1080p in H.264 (avc1)
+        yt-dlp "${yt_args[@]}" \
+            -S "res:1080,vcodec:h264,ext:mp4:m4a" \
+            -f "bestvideo[height<=1080][vcodec^=avc1]+bestaudio[ext=m4a]/bestvideo[height<=1080][vcodec^=avc1]+bestaudio/best[height<=1080][vcodec^=avc1]/best[height<=1080]/best" \
+            --merge-output-format mp4 \
+            --add-metadata \
+            --embed-thumbnail \
+            --restrict-filenames \
+            -o "$output_dir/%(title)s-%(id)s.%(ext)s" \
+            "$url"
         ;;
     *)
         echo "Invalid choice."
