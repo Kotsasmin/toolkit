@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-set -euo pipefail
+set -uo pipefail
 
 log() { echo "[+] $*"; }
 warn() { echo "[!] $*"; }
@@ -58,10 +58,9 @@ fi
 
 if command -v docker &> /dev/null; then
     log "Auditing Docker Containers for Active Malware & Lineage..."
-
     FOUND_BAD_CONTAINER=false
 
-    #Inspect by process tree & cgroup lineage from host high-CPU/malware PIDs
+    # Inspect by process tree & cgroup lineage from host high-CPU/malware PIDs
     for pid in $(pgrep -f "XX|xmrig|miner|SqGY" 2>/dev/null || true); do
         CGROUP=$(cat /proc/"$pid"/cgroup 2>/dev/null || true)
         CID=$(echo "$CGROUP" | grep -oE 'docker[-/][a-f0-9]{64}' | head -n1 | tr -d 'docker/-' || true)
@@ -73,7 +72,7 @@ if command -v docker &> /dev/null; then
         fi
     done
 
-    #Inspect inside container process tables
+    # Inspect inside container process tables
     for cid in $(docker ps -q 2>/dev/null || true); do
         MATCHED_PROCS=$(docker exec "$cid" ps aux 2>/dev/null | grep -iE 'XX|xmrig|miner|SqGY|/tmp/' | grep -v grep || true)
         if [ -n "$MATCHED_PROCS" ]; then
@@ -85,8 +84,81 @@ if command -v docker &> /dev/null; then
     done
 
     if [ "$FOUND_BAD_CONTAINER" = false ]; then
-        log "Docker containers appear clean."
+        log "Docker containers appear clean of running malware."
     fi
+
+    echo ""
+    log "Auditing Running Containers for High & Critical Node/NPM Vulnerabilities..."
+    for cid in $(docker ps -q 2>/dev/null || true); do
+        CNAME=$(docker inspect --format='{{.Name}}' "$cid" 2>/dev/null | tr -d '/')
+        PKG_PATH=$(docker exec "$cid" sh -c "find /app /usr/src/app /var/www / -maxdepth 3 -name package.json 2>/dev/null | head -n 1" 2>/dev/null || true)
+
+        if [ -n "$PKG_PATH" ]; then
+            APP_DIR=$(dirname "$PKG_PATH")
+            APP_NAME=$(docker exec "$cid" sh -c "grep -m1 '\"name\":' '$PKG_PATH' 2>/dev/null" 2>/dev/null | awk -F'"' '{print $4}' || echo "unknown")
+            HAS_NPM=$(docker exec "$cid" sh -c "command -v npm" 2>/dev/null || true)
+
+            if [ -n "$HAS_NPM" ]; then
+                AUDIT_RES=$(docker exec "$cid" sh -c "cd '$APP_DIR' && npm audit --audit-level=high 2>/dev/null" 2>/dev/null || true)
+                if echo "$AUDIT_RES" | grep -iE 'high|critical' | grep -vE '0 high|0 critical' > /dev/null; then
+                    err "[HIGH/CRITICAL CODE VULNERABILITY IN CONTAINER]"
+                    echo "    - Container Name: $CNAME"
+                    echo "    - Container ID:   $cid"
+                    echo "    - App Name:       $APP_NAME"
+                    echo "    - App Path:       $APP_DIR"
+                    echo "$AUDIT_RES" | grep -A 5 -iE 'high|critical' | head -n 10
+                    echo ""
+                else
+                    log "Container '$CNAME' ($APP_NAME) package audit: 0 high/critical."
+                fi
+            else
+                warn "Container '$CNAME' has package.json at $PKG_PATH, but 'npm' is not installed in the container image."
+            fi
+        fi
+    done
+fi
+
+echo ""
+log "Auditing Running Node/NPM Processes on Host OS..."
+HOST_NODE_PIDS=$(pgrep -f "node|npm" 2>/dev/null || true)
+
+if [ -n "$HOST_NODE_PIDS" ]; then
+    SCANNED_DIRS=""
+    for pid in $HOST_NODE_PIDS; do
+        COMM=$(ps -p "$pid" -o comm= 2>/dev/null || true)
+        if [[ "$COMM" =~ containerd|dockerd ]]; then continue; fi
+
+        CGROUP=$(cat /proc/"$pid"/cgroup 2>/dev/null || true)
+        if echo "$CGROUP" | grep -qE 'docker[-/][a-f0-9]{64}'; then continue; fi
+
+        APP_DIR=$(readlink -f /proc/"$pid"/cwd 2>/dev/null || true)
+
+        if [ -n "$APP_DIR" ] && [ -f "$APP_DIR/package.json" ]; then
+            if echo "$SCANNED_DIRS" | grep -q "$APP_DIR"; then continue; fi
+            SCANNED_DIRS="${SCANNED_DIRS}\n${APP_DIR}"
+
+            APP_NAME=$(grep -m1 '"name":' "$APP_DIR/package.json" 2>/dev/null | awk -F'"' '{print $4}' || echo "unnamed-app")
+            log "Checking Host Node App: '$APP_NAME' in directory: $APP_DIR"
+
+            if command -v npm &> /dev/null; then
+                AUDIT_OUTPUT=$(cd "$APP_DIR" && npm audit --audit-level=high 2>/dev/null || true)
+                if echo "$AUDIT_OUTPUT" | grep -iE 'high|critical' | grep -vE '0 high|0 critical' > /dev/null; then
+                    err "[HIGH/CRITICAL VULNERABILITY FOUND ON HOST]"
+                    echo "    - App Name:  $APP_NAME"
+                    echo "    - Directory: $APP_DIR"
+                    echo "    - Host PID:  $pid"
+                    echo "$AUDIT_OUTPUT" | grep -A 5 -iE 'high|critical' | head -n 15
+                    echo ""
+                else
+                    log "Host app '$APP_NAME' has no high or critical vulnerabilities."
+                fi
+            else
+                warn "npm binary not found on host to run audit in $APP_DIR."
+            fi
+        fi
+    done
+else
+    log "No independent Node/NPM host processes found."
 fi
 
 echo ""
