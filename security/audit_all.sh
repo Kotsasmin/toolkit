@@ -57,24 +57,34 @@ else
 fi
 
 if command -v docker &> /dev/null; then
-    log "Auditing & Cleaning Running Docker Containers..."
-    
-    INFECTED_CONTAINERS=""
-    for id in $(docker ps -q); do
-        if docker exec "$id" ps aux 2>/dev/null | grep -iE 'SqGY|xmrig|miner|/tmp/' | grep -v grep > /dev/null; then
-            INFECTED_CONTAINERS="${INFECTED_CONTAINERS} $id"
+    log "Auditing Docker Containers for Active Malware & Lineage..."
+
+    FOUND_BAD_CONTAINER=false
+
+    #Inspect by process tree & cgroup lineage from host high-CPU/malware PIDs
+    for pid in $(pgrep -f "XX|xmrig|miner|SqGY" 2>/dev/null || true); do
+        CGROUP=$(cat /proc/"$pid"/cgroup 2>/dev/null || true)
+        CID=$(echo "$CGROUP" | grep -oE 'docker[-/][a-f0-9]{64}' | head -n1 | tr -d 'docker/-' || true)
+
+        if [ -n "$CID" ]; then
+            CNAME=$(docker inspect --format='{{.Name}}' "$CID" 2>/dev/null | tr -d '/' || echo "unknown")
+            err "[MALWARE FOUND IN CONTAINER] Name: $CNAME | ID: $CID | Host PID: $pid"
+            FOUND_BAD_CONTAINER=true
         fi
     done
 
-    if [ -n "$INFECTED_CONTAINERS" ]; then
-        err "Malware execution detected inside Docker containers! Auto-stopping containers:"
-        for container_id in $INFECTED_CONTAINERS; do
-            C_NAME=$(docker inspect --format='{{.Name}}' "$container_id" 2>/dev/null | tr -d '/')
-            err "[STOPPING INFECTED CONTAINER] $C_NAME ($container_id)"
-            docker stop "$container_id" >/dev/null
-            docker rm -f "$container_id" >/dev/null
-        done
-    else
+    #Inspect inside container process tables
+    for cid in $(docker ps -q 2>/dev/null || true); do
+        MATCHED_PROCS=$(docker exec "$cid" ps aux 2>/dev/null | grep -iE 'XX|xmrig|miner|SqGY|/tmp/' | grep -v grep || true)
+        if [ -n "$MATCHED_PROCS" ]; then
+            CNAME=$(docker inspect --format='{{.Name}}' "$cid" 2>/dev/null | tr -d '/' || echo "unknown")
+            err "[MALWARE PROCESS ACTIVE] Container: $CNAME ($cid)"
+            echo "$MATCHED_PROCS"
+            FOUND_BAD_CONTAINER=true
+        fi
+    done
+
+    if [ "$FOUND_BAD_CONTAINER" = false ]; then
         log "Docker containers appear clean."
     fi
 fi
@@ -86,7 +96,7 @@ KPTR=$(cat /proc/sys/kernel/kptr_restrict 2>/dev/null || echo "unknown")
 
 if [ -s "$PRELOAD_FILE" ]; then
     err "LD_PRELOAD rootkit vector found in $PRELOAD_FILE:"
-    cat $PRELOAD_FILE || true
+    cat "$PRELOAD_FILE" || true
 else
     log "No LD_PRELOAD rootkits detected."
 fi
