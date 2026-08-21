@@ -99,14 +99,15 @@ if command -v docker &> /dev/null; then
             HAS_NPM=$(docker exec "$cid" sh -c "command -v npm" 2>/dev/null || true)
 
             if [ -n "$HAS_NPM" ]; then
-                AUDIT_RES=$(docker exec "$cid" sh -c "cd '$APP_DIR' && npm audit --audit-level=high 2>/dev/null" 2>/dev/null || true)
+                AUDIT_RES=$(docker exec "$cid" sh -c "cd '$APP_DIR' && ([ -f package-lock.json ] || npm i --package-lock-only --no-audit >/dev/null 2>&1) && npm audit --audit-level=high 2>&1; rm -f package-lock.json" 2>/dev/null || true)
+
                 if echo "$AUDIT_RES" | grep -iE 'high|critical' | grep -vE '0 high|0 critical' > /dev/null; then
                     err "[HIGH/CRITICAL CODE VULNERABILITY IN CONTAINER]"
                     echo "    - Container Name: $CNAME"
                     echo "    - Container ID:   $cid"
                     echo "    - App Name:       $APP_NAME"
                     echo "    - App Path:       $APP_DIR"
-                    echo "$AUDIT_RES" | grep -A 5 -iE 'high|critical' | head -n 10
+                    echo "$AUDIT_RES" | grep -E 'Severity: (high|critical)|vulnerabilities' || true
                     echo ""
                 else
                     log "Container '$CNAME' ($APP_NAME) package audit: 0 high/critical."
@@ -141,13 +142,13 @@ if [ -n "$HOST_NODE_PIDS" ]; then
             log "Checking Host Node App: '$APP_NAME' in directory: $APP_DIR"
 
             if command -v npm &> /dev/null; then
-                AUDIT_OUTPUT=$(cd "$APP_DIR" && npm audit --audit-level=high 2>/dev/null || true)
+                AUDIT_OUTPUT=$(cd "$APP_DIR" && ([ -f package-lock.json ] || npm i --package-lock-only --no-audit >/dev/null 2>&1) && npm audit --audit-level=high 2>&1 || true)
                 if echo "$AUDIT_OUTPUT" | grep -iE 'high|critical' | grep -vE '0 high|0 critical' > /dev/null; then
                     err "[HIGH/CRITICAL VULNERABILITY FOUND ON HOST]"
                     echo "    - App Name:  $APP_NAME"
                     echo "    - Directory: $APP_DIR"
                     echo "    - Host PID:  $pid"
-                    echo "$AUDIT_OUTPUT" | grep -A 5 -iE 'high|critical' | head -n 15
+                    echo "$AUDIT_OUTPUT" | grep -E 'Severity: (high|critical)|vulnerabilities' || true
                     echo ""
                 else
                     log "Host app '$APP_NAME' has no high or critical vulnerabilities."
