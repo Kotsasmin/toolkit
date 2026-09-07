@@ -23,7 +23,11 @@ for arg in "$@"; do
     fi
 done
 
-output_dir="output"
+if [ "$FROM_TOOLKIT" = "true" ]; then
+    output_dir="${HOME}/media"
+else
+    output_dir="output"
+fi
 [ ! -d "$output_dir" ] && mkdir -p "$output_dir"
 
 # User-Agent handling XD
@@ -82,10 +86,12 @@ case $choice in
     1)
         echo "Downloading Audio (MP3)..."
         yt-dlp "${yt_args[@]}" -x --audio-format mp3 --audio-quality 0 --add-metadata --embed-thumbnail --restrict-filenames -o "$output_dir/%(title)s-%(id)s.%(ext)s" "$url"
+        echo "Done! Saved to $output_dir/"
         ;;
     2)
         echo "Downloading Video (Max Quality)..."
         yt-dlp "${yt_args[@]}" -f "bestvideo+bestaudio/best" --merge-output-format mp4 --add-metadata --embed-thumbnail --restrict-filenames -o "$output_dir/%(title)s-%(id)s.%(ext)s" "$url"
+        echo "Done! Saved to $output_dir/"
         ;;
     3)
         echo "Downloading Video for Discord (<10MB)..."
@@ -138,6 +144,7 @@ case $choice in
             --restrict-filenames \
             -o "$output_dir/%(title)s-%(id)s.%(ext)s" \
             "$url"
+        echo "Done! Saved to $output_dir/"
         ;;
     *)
         echo "Invalid choice."
