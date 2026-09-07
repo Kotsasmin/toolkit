@@ -16,6 +16,13 @@ if ! command_exists ffmpeg; then
 fi
 
 
+FROM_TOOLKIT=false
+for arg in "$@"; do
+    if [[ "$arg" == "--from-toolkit" ]]; then
+        FROM_TOOLKIT=true
+    fi
+done
+
 output_dir="output"
 [ ! -d "$output_dir" ] && mkdir -p "$output_dir"
 
@@ -41,7 +48,27 @@ echo "1) Audio (MP3, Max Quality, Metadata)"
 echo "2) Video (Max Quality, Metadata)"
 echo "3) Video for Discord (<10MB, No Metadata)"
 echo "4) Video (FHD 1080p max, H.264/MP4 Compatible, No Recoding)"
+if [ "$FROM_TOOLKIT" = "true" ]; then
+    echo "0) Back (Return to Main Menu)"
+else
+    echo "0) Exit"
+fi
 read -r choice
+
+case $choice in
+    0|q|Q|b|B)
+        if [ "$FROM_TOOLKIT" = "true" ]; then
+            echo "Returning to Main Menu..."
+        fi
+        exit 0
+        ;;
+    1|2|3|4)
+        ;;
+    *)
+        echo "Error: Invalid choice."
+        exit 1
+        ;;
+esac
 
 echo "Enter YouTube URL:"
 read -r url
@@ -117,3 +144,8 @@ case $choice in
         exit 1
         ;;
 esac
+
+if [ "$FROM_TOOLKIT" = "true" ]; then
+    echo ""
+    read -rp "Press [Enter] to return to main menu..."
+fi

@@ -180,7 +180,7 @@ main_menu() {
 
         case $main_choice in
             1)
-                execute_script "$MEDIA_DIR/media.sh" false true
+                execute_script "$MEDIA_DIR/media.sh" false false "--from-toolkit"
                 ;;
             2)
                 menu_optimization
@@ -203,9 +203,6 @@ main_menu() {
     done
 }
 
-# -------------------------------------------------------------
-# CLI Argument Dispatcher
-# -------------------------------------------------------------
 
 show_help() {
     echo -e "${BOLD}Toolkit CLI${NC} - Fast execution for system tools"
