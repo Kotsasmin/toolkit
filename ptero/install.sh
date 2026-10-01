@@ -99,15 +99,11 @@ else
 fi
 log "Dependencies installed."
 
-# --- Installer Prompt ---
 echo ""
-echo "=========================================================================="
-echo "    System optimized and ready for Pterodactyl Wings installation!    "
-echo "=========================================================================="
+echo "System optimized and ready for Pterodactyl Wings installation."
 echo ""
-echo "To proceed with the Pterodactyl installation, please copy and paste"
-echo "the following command into your prompt (make sure you run 'sudo su' first):"
+echo "To proceed with the Pterodactyl installation, copy and paste"
+echo "the following command (run with root/sudo su):"
 echo ""
 echo "    bash <(curl -s https://pterodactyl-installer.se)"
 echo ""
-echo "=========================================================================="

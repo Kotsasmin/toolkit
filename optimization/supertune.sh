@@ -13,14 +13,16 @@ fi
 
 echo "Applying Full Low-Latency Optimizations"
 
-log "Tuning network stack..."
+log "Tuning network stack & kernel modules..."
 mkdir -p /etc/modules-load.d
 cat >/etc/modules-load.d/99-supertune.conf <<EOF
 sch_fq
 tcp_bbr
+zram
 EOF
 modprobe sch_fq 2>/dev/null || true
 modprobe tcp_bbr 2>/dev/null || true
+modprobe zram num_devices=1 2>/dev/null || modprobe zram 2>/dev/null || true
 
 mkdir -p /etc/sysctl.d
 cat >/etc/sysctl.d/99-supertune.conf <<EOF
@@ -56,7 +58,10 @@ net.ipv4.tcp_keepalive_time = 60
 net.ipv4.tcp_keepalive_intvl = 10
 net.ipv4.tcp_keepalive_probes = 6
 net.ipv4.tcp_congestion_control = bbr
-vm.swappiness = 10
+vm.swappiness = 150
+vm.page-cluster = 0
+vm.watermark_boost_factor = 0
+vm.watermark_scale_factor = 125
 vm.vfs_cache_pressure = 50
 vm.dirty_ratio = 10
 vm.dirty_background_ratio = 5
@@ -64,8 +69,31 @@ vm.max_map_count = 2147483642
 EOF
 sysctl --system >/dev/null 2>&1 || true
 
-log "Tuning VM and memory..."
-# Applied via /etc/sysctl.d/99-supertune.conf above
+log "Tuning VM, ZRAM & memory..."
+if [[ -b /dev/zram0 || $(modprobe zram num_devices=1 2>/dev/null || modprobe zram 2>/dev/null; [[ -b /dev/zram0 ]] && echo yes) == "yes" ]]; then
+    swapoff /dev/zram0 2>/dev/null || true
+    echo 1 > /sys/block/zram0/reset 2>/dev/null || true
+    ALGO="lzo-rle"
+    if grep -q "zstd" /sys/block/zram0/comp_algorithm 2>/dev/null; then
+        ALGO="zstd"
+    elif grep -q "lz4" /sys/block/zram0/comp_algorithm 2>/dev/null; then
+        ALGO="lz4"
+    fi
+    echo "$ALGO" > /sys/block/zram0/comp_algorithm
+    TOTAL_MEM_KB=$(awk '/MemTotal/ {print $2}' /proc/meminfo)
+    ZRAM_SIZE_BYTES=$((TOTAL_MEM_KB * 1024))
+    echo "$ZRAM_SIZE_BYTES" > /sys/block/zram0/disksize
+    mkswap -U clear -L zram0 /dev/zram0 >/dev/null 2>&1
+    swapon -p 32767 /dev/zram0 2>/dev/null || true
+    log "ZRAM ($ALGO, 100% RAM) enabled as highest-priority swap."
+fi
+
+if [[ -f /sys/kernel/mm/lru_gen/enabled ]]; then
+    log "Enabling Multi-Gen LRU (MGLRU)..."
+    echo y > /sys/kernel/mm/lru_gen/enabled 2>/dev/null || echo 7 > /sys/kernel/mm/lru_gen/enabled 2>/dev/null || true
+    mkdir -p /etc/tmpfiles.d
+    echo "w /sys/kernel/mm/lru_gen/enabled - - - - y" > /etc/tmpfiles.d/99-supertune-mglru.conf
+fi
 
 log "Tuning CPU Governors..."
 mkdir -p /etc/udev/rules.d

@@ -24,7 +24,7 @@ if [[ $TOTAL_MEM_MB -lt $REQUIRED_MB ]]; then
     err "Not enough memory. Need $((REQUIRED_MB / 1024))G, have $((TOTAL_MEM_MB / 1024))G"
     exit 1
 fi
-echo "--- Configuring memory lock limits ---"
+log "Configuring memory lock limits..."
 LIMITS_FILE="/etc/security/limits.d/99-hugepages.conf"
 cat >"$LIMITS_FILE" <<EOF
 *    soft    memlock    unlimited
@@ -32,7 +32,7 @@ cat >"$LIMITS_FILE" <<EOF
 root soft    memlock    unlimited
 root hard    memlock    unlimited
 EOF
-echo "--- Configuring sysctl ---"
+log "Configuring sysctl..."
 SYSCTL_FILE="/etc/sysctl.d/99-hugepages.conf"
 cat >"$SYSCTL_FILE" <<EOF
 vm.nr_hugepages = ${PAGES}
@@ -41,7 +41,7 @@ vm.overcommit_memory = 1
 vm.swappiness = 1
 vm.zone_reclaim_mode = 0
 EOF
-echo "--- Allocating huge pages ---"
+log "Allocating huge pages..."
 sync
 echo 3 >/proc/sys/vm/drop_caches || true
 sleep 1

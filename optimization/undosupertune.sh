@@ -19,6 +19,11 @@ rm -f /etc/modules-load.d/99-supertune.conf
 log "Removing sysctl configurations..."
 rm -f /etc/sysctl.d/99-supertune.conf
 
+log "Deactivating ZRAM swap & MGLRU configurations..."
+swapoff /dev/zram0 2>/dev/null || true
+echo 1 > /sys/block/zram0/reset 2>/dev/null || true
+rm -f /etc/tmpfiles.d/99-supertune-mglru.conf
+
 log "Removing CPU governor udev rules..."
 rm -f /etc/udev/rules.d/99-cpu-governor.rules
 

@@ -11,9 +11,8 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
-echo "=========================================="
-echo "   Pterodactyl Wings Debugger"
-echo "=========================================="
+echo "Pterodactyl Wings Debugger"
+echo ""
 
 if systemctl is-active --quiet wings; then
     log "Wings is currently running. Stopping it for log collection..."
@@ -28,9 +27,8 @@ LOG_FILE="/tmp/wings_debug_$(date +%s).log"
 journalctl -u wings -n 100 --no-pager > "$LOG_FILE"
 
 echo ""
-echo "--- Last 15 Lines of Log ---"
+echo "Last 15 Lines of Log:"
 tail -n 15 "$LOG_FILE"
-echo "----------------------------"
 echo ""
 
 log "Scanning for known errors..."
@@ -79,10 +77,8 @@ echo ""
 log "Uploading complete log for external review..."
 if command -v nc >/dev/null 2>&1; then
     PASTE_URL=$(cat "$LOG_FILE" | nc termbin.com 9999)
-    echo "=========================================="
-    echo "  Log uploaded successfully!"
-    echo "  Share this URL for help: $PASTE_URL"
-    echo "=========================================="
+    echo "Log uploaded successfully!"
+    echo "Share this URL for help: $PASTE_URL"
 else
     warn "netcat (nc) is not installed. Could not upload log."
     echo "You can review the log file locally at: $LOG_FILE"
