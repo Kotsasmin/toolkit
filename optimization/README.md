@@ -9,3 +9,4 @@ A collection of standalone scripts for system tuning and optimization.
 - **supertune.sh**: Applies full system-wide low-latency optimizations (Network, VM, CPU, ZRAM).
 - **tcptune.sh**: Applies only TCP/BBR network tuning.
 - **ramtune.sh**: Sets up ZRAM (ZSTD compression), Multi-Gen LRU (MGLRU), and low-latency VM memory tuning.
+- **amd_gaming_tune.sh**: Dedicated AMD Ryzen CPU & Radeon GPU gaming tuning (locks DPM clocks, enables EPP performance, disables deep C-states for zero wake latency; desktop with cooling recommended).

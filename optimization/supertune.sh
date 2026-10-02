@@ -66,6 +66,13 @@ vm.vfs_cache_pressure = 50
 vm.dirty_ratio = 10
 vm.dirty_background_ratio = 5
 vm.max_map_count = 2147483642
+kernel.sched_autogroup_enabled = 1
+kernel.nmi_watchdog = 0
+kernel.numa_balancing = 0
+kernel.pid_max = 4194304
+fs.file-max = 2097152
+fs.inotify.max_user_watches = 1048576
+fs.inotify.max_user_instances = 8192
 EOF
 sysctl --system >/dev/null 2>&1 || true
 
@@ -95,6 +102,50 @@ if [[ -f /sys/kernel/mm/lru_gen/enabled ]]; then
     echo "w /sys/kernel/mm/lru_gen/enabled - - - - y" > /etc/tmpfiles.d/99-supertune-mglru.conf
 fi
 
+if [[ -f /sys/kernel/mm/transparent_hugepage/enabled ]]; then
+    log "Setting Transparent Hugepages (THP) to madvise..."
+    echo madvise > /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null || true
+    echo madvise > /sys/kernel/mm/transparent_hugepage/defrag 2>/dev/null || true
+    mkdir -p /etc/tmpfiles.d
+    cat >/etc/tmpfiles.d/99-supertune-thp.conf <<EOF
+w /sys/kernel/mm/transparent_hugepage/enabled - - - - madvise
+w /sys/kernel/mm/transparent_hugepage/defrag - - - - madvise
+EOF
+fi
+
+log "Tuning NVMe & SSD I/O Schedulers..."
+for dev in /sys/block/sd* /sys/block/nvme* /sys/block/vd*; do
+    [[ -d "$dev" ]] || continue
+    ROTATIONAL=$(cat "$dev/queue/rotational" 2>/dev/null || echo 1)
+    SCHED_FILE="$dev/queue/scheduler"
+    [[ -f "$SCHED_FILE" ]] || continue
+    AVAILABLE=$(cat "$SCHED_FILE")
+
+    if [[ "$ROTATIONAL" == "0" ]]; then
+        if echo "$AVAILABLE" | grep -q "none"; then
+            echo none > "$SCHED_FILE" 2>/dev/null || true
+        elif echo "$AVAILABLE" | grep -q "mq-deadline"; then
+            echo mq-deadline > "$SCHED_FILE" 2>/dev/null || true
+        fi
+        [[ -f "$dev/queue/nr_requests" ]] && echo 2048 > "$dev/queue/nr_requests" 2>/dev/null || true
+        echo 256 > "$dev/queue/read_ahead_kb" 2>/dev/null || true
+    else
+        if echo "$AVAILABLE" | grep -q "bfq"; then
+            echo bfq > "$SCHED_FILE" 2>/dev/null || true
+        fi
+        echo 2048 > "$dev/queue/read_ahead_kb" 2>/dev/null || true
+    fi
+    echo 0 > "$dev/queue/iostats" 2>/dev/null || true
+    echo 0 > "$dev/queue/add_random" 2>/dev/null || true
+done
+
+mkdir -p /etc/udev/rules.d
+cat >/etc/udev/rules.d/60-supertune-ioschedulers.rules <<'EOF'
+ACTION=="add|change", KERNEL=="nvme[0-9]*", ATTR{queue/scheduler}="none", ATTR{queue/read_ahead_kb}="256", ATTR{queue/nr_requests}="2048", ATTR{queue/iostats}="0"
+ACTION=="add|change", KERNEL=="sd[a-z]|vd[a-z]", ATTR{queue/rotational}=="0", ATTR{queue/scheduler}="none", ATTR{queue/read_ahead_kb}="256", ATTR{queue/iostats}="0"
+ACTION=="add|change", KERNEL=="sd[a-z]|vd[a-z]", ATTR{queue/rotational}=="1", ATTR{queue/scheduler}="bfq", ATTR{queue/read_ahead_kb}="2048"
+EOF
+
 log "Tuning CPU Governors..."
 mkdir -p /etc/udev/rules.d
 cat >/etc/udev/rules.d/99-cpu-governor.rules <<EOF
@@ -120,9 +171,20 @@ cat >/etc/security/limits.d/99-performance.conf <<EOF
 *    hard    memlock   unlimited
 *    soft    nproc     unlimited
 *    hard    nproc     unlimited
+*    soft    nice      -20
+*    hard    nice      -20
+*    soft    rtprio    99
+*    hard    rtprio    99
 EOF
 
-log "Applying TCP Tuning..."
+log "Applying TCP & Network Interface Tuning..."
+for iface in /sys/class/net/*; do
+    IFNAME=$(basename "$iface")
+    [[ "$IFNAME" == "lo" ]] && continue
+    [[ -d "$iface/device" ]] || continue
+    ip link set "$IFNAME" txqueuelen 10000 2>/dev/null || true
+done
+
 mkdir -p /usr/local/bin
 cat >/usr/local/bin/supertune-routes.sh <<'EOF'
 #!/usr/bin/env bash
@@ -134,6 +196,12 @@ done
 ip route show | while read -r route; do
     echo "$route" | grep -q "quickack" && continue
     ip route replace $route quickack 1 2>/dev/null || true
+done
+for iface in /sys/class/net/*; do
+    IFNAME=$(basename "$iface")
+    [[ "$IFNAME" == "lo" ]] && continue
+    [[ -d "$iface/device" ]] || continue
+    ip link set "$IFNAME" txqueuelen 10000 2>/dev/null || true
 done
 EOF
 chmod +x /usr/local/bin/supertune-routes.sh
