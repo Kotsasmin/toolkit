@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-set -euo pipefail
+set -uo pipefail
 
 log() { echo "[+] $*"; }
 warn() { echo "[!] $*"; }
@@ -29,13 +29,58 @@ if [ "$KPTR" = "0" ]; then
 fi
 
 log "Checking Host SUID Binaries (Privilege Escalation Vector)..."
-SUID_FILES=$(find / -path "/var/lib/docker" -prune -o -path "/var/lib/containerd" -prune -o -perm -4000 -type f 2>/dev/null | grep -vE '/usr/bin/sudo|/usr/bin/passwd|/usr/bin/su|/usr/bin/newgrp|/usr/lib/snapd|/usr/lib/dbus|/usr/bin/chfn|/usr/bin/chsh|/usr/bin/mount|/usr/bin/gpasswd|/usr/bin/umount|/usr/bin/fusermount3|/usr/bin/ntfs-3g|/usr/lib/openssh/ssh-keysign' || true)
+# Only local filesystems where SUID works. Network shares, FUSE and nosuid mounts are skipped,
+# because SUID can't be used there and an unreachable share would hang the scan forever.
+SUID_FS='^(ext[234]|xfs|btrfs|f2fs|zfs|bcachefs|jfs|reiserfs|tmpfs)$'
+SUID_SKIP='^/(proc|sys|run/user|\.snapshots|var/lib/(docker|containerd|pterodactyl/volumes))(/|$)'
+LOW_PRIO=(nice -n 19)
+command -v ionice &>/dev/null && LOW_PRIO+=(ionice -c3)
+
+if command -v findmnt &>/dev/null; then
+    SUID_MOUNTS=$(findmnt -rn -o TARGET,FSTYPE,OPTIONS 2>/dev/null | awk -v fs="$SUID_FS" '$2 ~ fs && $3 !~ /(^|,)nosuid(,|$)/ {print $1}' | sort -u)
+else
+    SUID_MOUNTS=/
+fi
+
+SUID_ALL=""
+while IFS= read -r mnt; do
+    [[ -n $mnt ]] || continue
+    mnt=$(printf '%b' "$mnt")
+    [[ $mnt =~ $SUID_SKIP ]] && continue
+    found=$(timeout 300 "${LOW_PRIO[@]}" find "$mnt" -xdev \( -path /var/lib/docker -o -path /var/lib/containerd -o -path /var/lib/pterodactyl/volumes -o -path /.snapshots \) -prune -o -perm -4000 -type f -print 2>/dev/null)
+    [[ $? -eq 124 ]] && warn "SUID scan of $mnt took over 5 minutes and was stopped - results for it are partial."
+    [[ -n $found ]] && SUID_ALL+="$found"$'\n'
+done <<<"$SUID_MOUNTS"
+
+# Files that belong to an installed package are expected; anything else is worth a look
+pkg_owned() {
+    if command -v pacman &>/dev/null; then
+        pacman -Qoq "$1" &>/dev/null
+    elif command -v dpkg &>/dev/null; then
+        dpkg -S "$1" &>/dev/null || dpkg -S "${1#/usr}" &>/dev/null
+    elif command -v rpm &>/dev/null; then
+        rpm -qf "$1" &>/dev/null
+    else
+        [[ $1 =~ ^/usr/(bin/(sudo|passwd|su|newgrp|chfn|chsh|mount|umount|gpasswd|fusermount3?|ntfs-3g|pkexec)|lib/(snapd|dbus|openssh/ssh-keysign|polkit)) ]]
+    fi
+}
+
+SUID_FILES=""
+SUID_KNOWN=0
+while IFS= read -r f; do
+    [[ -n $f ]] || continue
+    if pkg_owned "$f"; then
+        SUID_KNOWN=$((SUID_KNOWN + 1))
+    else
+        SUID_FILES+="    $f"$'\n'
+    fi
+done < <(printf '%s' "$SUID_ALL" | sort -u)
 
 if [ -n "$SUID_FILES" ]; then
-    warn "Non-standard host SUID root files found:"
-    echo "$SUID_FILES"
+    warn "SUID root files that don't belong to any installed package:"
+    printf '%s' "$SUID_FILES"
 else
-    log "SUID permissions look normal on host."
+    log "SUID permissions look normal on host ($SUID_KNOWN SUID files, all from installed packages)."
 fi
 
 log "Auditing Cron Jobs & Autostart Persistence..."
@@ -63,14 +108,38 @@ fi
 
 log "Scanning for Pending Security Updates & Outdated Packages..."
 if command -v apt-get &> /dev/null; then
-    PENDING_SEC_UPDATES=$(apt-get -s upgrade 2>/dev/null | grep -iE 'security|ubuntu' | wc -l || true)
-    if [ "$PENDING_SEC_UPDATES" -gt 15 ]; then
-        warn "System has $PENDING_SEC_UPDATES pending software updates."
+    # NoLocking: don't wait behind a running apt/unattended-upgrades
+    UPDATES=$(timeout 120 apt-get -s -o Debug::NoLocking=1 upgrade 2>/dev/null)
+    RC=$?
+    TOTAL=$(grep -c '^Inst ' <<<"$UPDATES")
+    SECURITY=$(grep '^Inst ' <<<"$UPDATES" | grep -ci 'security')
+    if [ "$RC" -eq 124 ]; then
+        warn "Update check timed out."
+    elif [ "$SECURITY" -gt 0 ]; then
+        warn "System has $SECURITY pending security updates ($TOTAL updates in total)."
+    elif [ "$TOTAL" -gt 0 ]; then
+        log "$TOTAL updates pending, none marked as security updates."
     else
         log "System packages are up to date."
     fi
+elif command -v checkupdates &> /dev/null; then
+    UPDATES=$(timeout 120 checkupdates 2>/dev/null)
+    if [ $? -eq 124 ]; then
+        warn "Update check timed out."
+    elif [ -n "$UPDATES" ]; then
+        warn "System has $(wc -l <<<"$UPDATES") pending package updates (Arch doesn't mark security updates - update regularly)."
+    else
+        log "System packages are up to date."
+    fi
+elif command -v dnf &> /dev/null; then
+    SECURITY=$(timeout 120 dnf -q updateinfo list --security 2>/dev/null | grep -c .)
+    if [ "$SECURITY" -gt 0 ]; then
+        warn "System has $SECURITY pending security updates."
+    else
+        log "No pending security updates."
+    fi
 else
-    log "Non-apt system, skipping package updates check."
+    log "No supported package manager found, skipping package updates check."
 fi
 
 log "System audit complete."
