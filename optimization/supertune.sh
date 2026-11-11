@@ -19,6 +19,7 @@ Usage: supertune.sh [options]
   (no options)        apply everything that fits this machine
   --dry-run, -n       show what would change without changing anything (no root needed)
   --status, -s        show the detected profile and the current tuning state
+  --report            machine-readable state of every tweak (used by status.sh, changes nothing)
   --undo, -r          restore the saved original values and remove supertune's files
   --profile NAME      force a profile: desktop, laptop, server, vm, hypervisor, container
   --only LIST         run only these modules (comma separated)
@@ -78,6 +79,20 @@ CHANGED=0
 WROTE=0
 SYSCTL_BUF=""
 declare -A ADMIN_SYSCTL
+declare -A SUPERTUNE_SYSCTL
+
+# --report: every knob is checked like a dry run, but instead of "would change" lines it prints
+#   R|module|state|label|current value|detail
+# state: script = set by supertune, good = already fine without supertune,
+#        fix = supertune would change it, info = not a supertune knob, just context.
+REPORT=0
+CUR_MOD=""
+PENDING_FILES=0
+rep() {
+    local state=$1 label=$2 value=${3:-} detail=${4:-}
+    printf 'R|%s|%s|%s|%s|%s\n' "$CUR_MOD" "$state" "${label//|//}" "${value//|//}" "${detail//|//}" >&3
+}
+state_has() { grep -qF -- "$1|$2|" "$STATE_FILE" 2>/dev/null; }
 
 section() {
     echo
@@ -85,15 +100,33 @@ section() {
 }
 did() {
     CHANGES=$((CHANGES + 1))
+    if ((REPORT)); then
+        if [[ $1 =~ ^(.+):\ (.*)\ -\>\ (.*)$ ]]; then
+            rep fix "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "-> ${BASH_REMATCH[3]}"
+        else
+            rep fix "$1"
+        fi
+        return 0
+    fi
     if ((DRY_RUN)); then echo "    would: $*"; else echo "    $*"; fi
 }
-info() { echo "    - $*"; }
-skip() { SKIPPED+=("$*"); }
+info() {
+    ((REPORT)) && { rep info "$*"; return 0; }
+    echo "    - $*"
+}
+skip() {
+    ((REPORT)) && { rep info "$*"; return 0; }
+    SKIPPED+=("$*")
+}
 problem() {
+    ((REPORT)) && { rep info "$*"; return 0; }
     PROBLEMS+=("$*")
     warn "$*"
 }
-note() { NOTES+=("$*"); }
+note() {
+    ((REPORT)) && { rep info "$*"; return 0; }
+    NOTES+=("$*")
+}
 
 ###############################################################################
 # Low-level helpers
@@ -148,6 +181,18 @@ set_sysfs() {
     CHANGED=0
     [[ -e $path ]] || return 2
     cur=$(read_sel "$path") || return 2
+    if ((REPORT)); then
+        [[ $cur == "$val" ]] || CHANGED=1
+        [[ -n $label ]] || return 0
+        if ((CHANGED)); then
+            rep fix "$label" "$cur" "-> $val"
+        elif state_has sysfs "$path"; then
+            rep script "$label" "$cur"
+        else
+            rep good "$label" "$cur"
+        fi
+        return 0
+    fi
     [[ $cur == "$val" ]] && return 0
     if ((DRY_RUN)); then
         CHANGED=1
@@ -169,7 +214,19 @@ load_admin_sysctls() {
     local f line key
     for f in /etc/sysctl.conf /etc/sysctl.d/*.conf /run/sysctl.d/*.conf; do
         [[ -f $f ]] || continue
-        case ${f##*/} in 99-supertune*.conf | 99-tcptune.conf | 99-ramtune.conf) continue ;; esac
+        case ${f##*/} in
+        99-supertune*.conf)
+            while IFS= read -r line; do
+                line=${line%%#*}
+                [[ $line == *=* ]] || continue
+                key=${line%%=*}
+                key=${key//[[:space:]]/}
+                [[ -n $key ]] && SUPERTUNE_SYSCTL[$key]=$f
+            done <"$f"
+            continue
+            ;;
+        99-tcptune.conf | 99-ramtune.conf) continue ;;
+        esac
         while IFS= read -r line; do
             line=${line%%#*}
             [[ $line == *=* ]] || continue
@@ -188,6 +245,10 @@ load_admin_sysctls() {
 set_sysctl() {
     local key=$1 val=$2 mode=${3:-} path cur want
     path=/proc/sys/${key//.//}
+    if ((REPORT)); then
+        report_sysctl "$key" "$val" "$mode"
+        return
+    fi
     if [[ -n ${ADMIN_SYSCTL[$key]:-} ]]; then
         skip "$key: kept your setting from ${ADMIN_SYSCTL[$key]}"
         return 1
@@ -218,6 +279,40 @@ set_sysctl() {
     SYSCTL_BUF+="$key = $want"$'\n'
 }
 
+# A sysctl that is already as good as supertune's value counts as fine: equal, or (for
+# raise/lower knobs) already further in that direction.
+report_sysctl() {
+    local key=$1 val=$2 mode=$3 path cur want ok=0
+    path=/proc/sys/${key//.//}
+    [[ -r $path ]] || return 1
+    cur=$(tr -s ' \t' ' ' <"$path" 2>/dev/null)
+    cur=${cur% }
+    want=$(tr -s ' \t' ' ' <<<"$val")
+    if [[ $cur == "$want" ]]; then
+        ok=1
+    elif [[ -n $mode && $cur =~ ^[0-9]+$ && $want =~ ^[0-9]+$ ]]; then
+        [[ $mode == raise ]] && ((cur > want)) && ok=1
+        [[ $mode == lower ]] && ((cur < want)) && ok=1
+    fi
+    if [[ -n ${ADMIN_SYSCTL[$key]:-} ]]; then
+        if ((ok)); then
+            rep good "$key" "$cur" "set in ${ADMIN_SYSCTL[$key]}"
+        else
+            rep info "$key" "$cur" "your setting in ${ADMIN_SYSCTL[$key]}, supertune leaves it alone (it would use $want)"
+        fi
+        return 1
+    fi
+    if ((!ok)); then
+        rep fix "$key" "$cur" "-> $want"
+    elif [[ -n ${SUPERTUNE_SYSCTL[$key]:-} ]]; then
+        rep script "$key" "$cur"
+    else
+        rep good "$key" "$cur"
+    fi
+    # Same as a real run: a value that is already higher/lower than needed is not written to the file
+    [[ $cur != "$want" && $ok == 1 ]] || SYSCTL_BUF+="$key = $want"$'\n'
+}
+
 flush_sysctl() {
     local file=/etc/sysctl.d/99-supertune-$1.conf
     if [[ -n $SYSCTL_BUF ]]; then
@@ -233,6 +328,10 @@ write_file() {
     local path=$1 content=$2 mode=${3:-644}
     WROTE=0
     if [[ -f $path && ! -L $path ]] && [[ "$(cat "$path" 2>/dev/null)" == "$content" ]]; then
+        return 0
+    fi
+    if ((REPORT)); then
+        PENDING_FILES=$((PENDING_FILES + 1))
         return 0
     fi
     if ((DRY_RUN)); then
@@ -253,6 +352,10 @@ write_file() {
 
 remove_file() {
     [[ -e $1 || -L $1 ]] || return 0
+    if ((REPORT)); then
+        [[ $CUR_MOD == cleanup ]] && rep fix "old file from an earlier tuning script" "$1" "-> removed"
+        return 0
+    fi
     if ((DRY_RUN)); then
         did "remove $1"
         return 0
@@ -263,6 +366,27 @@ remove_file() {
 # svc_set UNIT on|off - enable+start or disable+stop, remembering the previous state.
 svc_set() {
     local unit=$1 want=$2 en act
+    if ((REPORT)); then
+        if ! unit_exists "$unit"; then
+            [[ $want == on ]] && rep fix "$unit" "not set up" "-> enabled and running"
+            return 0
+        fi
+        en=$(systemctl is-enabled "$unit" 2>/dev/null)
+        act=$(systemctl is-active "$unit" 2>/dev/null)
+        [[ $want == on ]] || return 0
+        if [[ $en == enabled && $act == active ]]; then
+            if [[ $unit == supertune-* ]] || state_has svc "$unit"; then
+                rep script "$unit" "enabled, $act"
+            else
+                rep good "$unit" "enabled, $act"
+            fi
+        elif [[ $en == enabled || $en == disabled ]]; then
+            rep fix "$unit" "$en, $act" "-> enabled and running"
+        else
+            rep info "$unit" "$en" "left alone by supertune"
+        fi
+        return 0
+    fi
     if ((DRY_RUN)) && ! unit_exists "$unit"; then
         [[ $want == on ]] && did "enable and start $unit"
         return 0
@@ -522,6 +646,10 @@ setup_zram() {
     if zram_foreign; then
         if zram_swap_active; then
             ZRAM_OK=1
+            if ((REPORT)); then
+                rep good "zram swap" "$(read_sel $dev/comp_algorithm), $(($(cat $dev/disksize 2>/dev/null || echo 0) / 1073741824)) GB" "managed by zram-generator or similar"
+                return
+            fi
             info "zram is managed by your system (zram-generator or similar) - kept as is"
         else
             skip "zram: another zram tool is configured but not active - left alone"
@@ -557,7 +685,14 @@ setup_zram() {
         cur_algo=$(read_sel $dev/comp_algorithm)
         cur_size=$(cat $dev/disksize 2>/dev/null)
         if [[ $cur_algo == "$algo" ]] && ((cur_size >= size * 9 / 10 && cur_size <= size * 11 / 10)); then
-            info "zram already set up ($algo, $((cur_size / 1073741824)) GB) - kept"
+            if ((REPORT)); then
+                if [[ -f /etc/systemd/system/supertune-zram.service ]]; then
+                    rep script "zram swap" "$algo, $((cur_size / 1073741824)) GB"
+                else
+                    rep good "zram swap" "$algo, $((cur_size / 1073741824)) GB"
+                fi
+            fi
+            ((REPORT)) || info "zram already set up ($algo, $((cur_size / 1073741824)) GB) - kept"
         else
             used=$(awk '{print $1}' $dev/mm_stat 2>/dev/null)
             avail=$(awk '/^MemAvailable:/{print $2 * 1024}' /proc/meminfo)
@@ -594,6 +729,10 @@ WantedBy=swap.target"
     svc_set supertune-zram.service on
     if ((DRY_RUN)); then
         ZRAM_OK=1
+        if ((REPORT)); then
+            zram_swap_active || rep fix "zram swap" "off" "-> $algo, $((size / 1073741824)) GB"
+            return
+        fi
         zram_swap_active || did "zram swap: $algo, $((size / 1073741824)) GB"
         return
     fi
@@ -664,6 +803,13 @@ mod_memory() {
 
     if [[ -e $lru/enabled ]]; then
         cur=$(cat $lru/enabled 2>/dev/null)
+        if ((REPORT)) && [[ $cur != 0x0000 ]]; then
+            if state_has sysfs $lru/enabled || [[ -f /etc/tmpfiles.d/99-supertune-memory.conf ]]; then
+                rep script "Multi-Gen LRU" "on ($cur)"
+            else
+                rep good "Multi-Gen LRU" "on ($cur)"
+            fi
+        fi
         if [[ $cur == 0x0000 ]]; then
             if ((DRY_RUN)); then
                 did "Multi-Gen LRU: off -> on"
@@ -829,6 +975,9 @@ mod_cpu() {
 
     if has_systemd && systemctl is-active -q power-profiles-daemon 2>/dev/null && command -v powerprofilesctl >/dev/null 2>&1; then
         cur=$(powerprofilesctl get 2>/dev/null)
+        if ((REPORT)) && [[ $cur == performance ]]; then
+            if state_has ppd profile; then rep script "power profile" "$cur"; else rep good "power profile" "$cur"; fi
+        fi
         if [[ -n $cur && $cur != performance ]] && powerprofilesctl list 2>/dev/null | grep -q 'performance:'; then
             if ((DRY_RUN)); then
                 did "power profile: $cur -> performance"
@@ -854,6 +1003,9 @@ mod_cpu() {
             set_sysfs "$gov" performance && ((CHANGED)) && n=$((n + 1))
         done
         ((n)) && did "CPU governor: $cur -> performance ($n cores)"
+        if ((REPORT && !n)); then
+            if [[ -f /etc/udev/rules.d/99-supertune-cpu.rules ]]; then rep script "CPU governor" "$cur"; else rep good "CPU governor" "$cur"; fi
+        fi
         write_file /etc/udev/rules.d/99-supertune-cpu.rules '# Managed by supertune (cpu)
 SUBSYSTEM=="cpu", ACTION=="add", TEST=="cpufreq/scaling_governor", ATTR{cpufreq/scaling_governor}="performance"'
         ((DRY_RUN)) || udevadm control --reload >/dev/null 2>&1
@@ -1041,11 +1193,41 @@ WantedBy=timers.target"
     [[ -d /etc/networkd-dispatcher/routable.d ]] && write_file /etc/networkd-dispatcher/routable.d/50-supertune "$wrapper" 755
 }
 
+report_routes_nics() {
+    local out want n
+    want="initrwnd $RWND, quickack${CWND:+, initcwnd $CWND}"
+    out=$(TUNE_DRY=1 tune_routes)
+    n=$(grep -c 'would:' <<<"$out")
+    if ((n)); then
+        rep fix "route options" "$n route(s) without them" "-> $want"
+    elif [[ -f $NET_HOOK ]]; then
+        rep script "route options" "$want"
+    else
+        rep good "route options" "$want"
+    fi
+    [[ $PROFILE == container ]] && return
+    ((NIC_RINGS || RPS)) || return
+    out=$(TUNE_DRY=1 tune_nics)
+    if [[ -n $out ]]; then
+        while IFS= read -r n; do
+            n=${n#*would: }
+            rep fix "NIC" "${n%% -> *}" "${n#* -> }"
+        done <<<"$out"
+    else
+        if [[ -f $NET_HOOK ]]; then n=script; else n=good; fi
+        ((NIC_RINGS)) && rep "$n" "NIC ring buffers" "at hardware maximum"
+        ((RPS)) && rep "$n" "packet steering (RPS)" "spread over CPUs"
+    fi
+}
+
 # tcp_rmem/tcp_wmem: only raise the max, keep the kernel's min and default
 tcp_buf() {
     local key=$1 def=$2 max=$3 cur
     cur=$(awk '{print $3}' "/proc/sys/${key//.//}" 2>/dev/null)
-    [[ -n $cur ]] && ((cur > max)) && return 0
+    if [[ -n $cur ]] && ((cur > max)); then
+        ((REPORT)) && rep good "$key" "$(tr -s ' \t' ' ' <"/proc/sys/${key//.//}")"
+        return 0
+    fi
     set_sysctl "$key" "4096 $def $max"
 }
 
@@ -1139,7 +1321,9 @@ options nf_conntrack hashsize=$hash"
 
     if command -v ip >/dev/null 2>&1; then
         install_net_hooks
-        if ((DRY_RUN)); then
+        if ((REPORT)); then
+            report_routes_nics
+        elif ((DRY_RUN)); then
             TUNE_DRY=1 tune_routes
             [[ $PROFILE != container ]] && TUNE_DRY=1 tune_nics
         else
@@ -1419,6 +1603,26 @@ show_status() {
 # Main
 ###############################################################################
 
+run_report() {
+    local m
+    exec 3>&1
+    printf 'P|%s|%s|%s\n' "$PROFILE" "$PROFILE_REASON" "$(describe)"
+    if [[ -f $STATE_FILE || -d $CONF_DIR ]] || compgen -G "/etc/sysctl.d/99-supertune-*.conf" >/dev/null; then
+        echo "A|yes"
+    else
+        echo "A|no"
+    fi
+    CUR_MOD=cleanup
+    cleanup_legacy >/dev/null 2>&1
+    for m in $ALL_MODULES; do
+        CUR_MOD=$m
+        PENDING_FILES=0
+        "mod_$m" >/dev/null 2>&1
+        ((PENDING_FILES)) && rep fix "settings kept after reboot" "$PENDING_FILES config file(s) missing or outdated" "-> written by supertune"
+    done
+    exec 3>&-
+}
+
 summary() {
     local s
     echo
@@ -1447,6 +1651,11 @@ main() {
         case $1 in
         --dry-run | -n) DRY_RUN=1 ;;
         --status | -s) MODE=status ;;
+        --report)
+            MODE=report
+            DRY_RUN=1
+            REPORT=1
+            ;;
         --undo | --revert | -r) MODE=undo ;;
         --profile | -p)
             FORCED_PROFILE=${2:-}
@@ -1486,6 +1695,10 @@ main() {
     detect
     if [[ $MODE == status ]]; then
         show_status
+        exit 0
+    fi
+    if [[ $MODE == report ]]; then
+        run_report
         exit 0
     fi
     if ((EUID != 0 && !DRY_RUN)); then

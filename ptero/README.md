@@ -1,4 +1,6 @@
-# Pterodactyl Toolkit
+# Pterodactyl Toolkit (legacy)
+
+> These tools are kept for existing Pterodactyl setups. Calagopus support is coming soon.
 
 Small scripts to help with installing and debugging Pterodactyl Wings.
 
